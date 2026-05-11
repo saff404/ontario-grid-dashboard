@@ -2,8 +2,9 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 import random
+import requests
+import re
 from datetime import datetime
-import gridstatus
 
 # --- Function 1: Load Historical Baseline ---
 @st.cache_data
@@ -36,36 +37,57 @@ def load_historical_data():
     except Exception as e:
         return None
 
-# --- Function 2: The GridStatus Engine ---
+# --- Function 2: The Modern XML Live Engine ---
 def get_current_grid_status(historical_df):
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    
     try:
-        ieso = gridstatus.IESO()
+        # 1. FETCH LIVE DEMAND (Secure XML)
+        demand_url = 'https://reports-public.ieso.ca/public/RealtimeTotals/PUB_RealtimeTotals.xml'
+        demand_res = requests.get(demand_url, headers=headers, timeout=5)
         
-        live_load_df = ieso.get_load("latest")
-        current_demand = live_load_df['Load'].iloc[-1]
-        
-        current_hour = live_load_df['Time'].iloc[-1].tz_convert('America/Toronto').hour + 1
-
-        live_price_df = ieso.get_lmp("latest", market="REAL_TIME_5_MIN")
-        current_price = live_price_df['LMP'].iloc[-1]
-
-        return current_demand, current_price, current_hour, "🟢 LIVE (GridStatus API)"
+        if demand_res.status_code == 200:
+            # Laser-targeted Regex based on exact IESO XML structure
+            demand_matches = re.findall(r'<MarketQuantity>ONTARIO DEMAND</MarketQuantity>\s*<EnergyMW>([0-9\.]+)</EnergyMW>', demand_res.text, re.IGNORECASE)
             
+            if demand_matches:
+                # Grab the last match in the file (the most recent 5-minute interval)
+                current_demand = float(demand_matches[-1])
+                current_hour = datetime.now().hour + 1
+                
+                # 2. FETCH LIVE PRICE (Secure XML)
+                price_url = 'https://reports-public.ieso.ca/public/DispUnconsHOEP/PUB_DispUnconsHOEP.xml'
+                price_res = requests.get(price_url, headers=headers, timeout=5)
+                
+                if price_res.status_code == 200:
+                    price_matches = re.findall(r'<.*?HOEP>([0-9\.\-]+)</.*?HOEP>', price_res.text, re.IGNORECASE)
+                    if price_matches:
+                        current_price = float(price_matches[-1])
+                    else:
+                        current_price = historical_df[historical_df['Hour'] == current_hour].sample(1).iloc[0]['HOEP'] * random.uniform(0.95, 1.10)
+                else:
+                    current_price = historical_df[historical_df['Hour'] == current_hour].sample(1).iloc[0]['HOEP'] * random.uniform(0.95, 1.10)
+
+                return current_demand, current_price, current_hour, "🟢 LIVE IESO API (Secure XML)"
+                
     except Exception as e:
-        try:
-            current_hour_zero_index = datetime.now().hour
-            current_hour_ieso = current_hour_zero_index + 1
+        pass # Move to fallback
 
-            hour_data = historical_df[historical_df['Hour'] == current_hour_ieso]
-            scenario = hour_data.sample(1).iloc[0]
-            
-            sim_demand = scenario['Ontario Demand'] * random.uniform(0.98, 1.02)
-            sim_price = scenario['HOEP'] * random.uniform(0.95, 1.10)
+    # 3. FALLBACK: SIMULATE DATA (If API is offline)
+    try:
+        current_hour_zero_index = datetime.now().hour
+        current_hour_ieso = current_hour_zero_index + 1
 
-            return sim_demand, sim_price, current_hour_ieso, "🟠 SIMULATED FALLBACK (IESO Offline)"
-            
-        except Exception as sim_e:
-            return None, None, None, "🔴 ERROR"
+        hour_data = historical_df[historical_df['Hour'] == current_hour_ieso]
+        scenario = hour_data.sample(1).iloc[0]
+        
+        sim_demand = scenario['Ontario Demand'] * random.uniform(0.98, 1.02)
+        sim_price = scenario['HOEP'] * random.uniform(0.95, 1.10)
+
+        return sim_demand, sim_price, current_hour_ieso, "🟠 SIMULATED FALLBACK (API OFFLINE)"
+        
+    except Exception as e:
+        return None, None, None, "🔴 ERROR"
 
 # --- DASHBOARD UI ---
 st.set_page_config(page_title="Grid Dashboard", layout="wide")

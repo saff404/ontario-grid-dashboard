@@ -1,6 +1,5 @@
 pandas
 streamlit
 plotly
-gridstatus
 pytz
 requests
